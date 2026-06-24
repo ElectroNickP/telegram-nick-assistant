@@ -1,64 +1,106 @@
-"""
-Mention handler - detects when user is mentioned or replied to.
-"""
-
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional
 from telethon import events
-from telethon.tl.types import (
-    MessageEntityMention,
-    MessageEntityMentionName,
-    User,
-)
+from telethon.tl.types import User
+
+from config import config
+from .rules import ReplyRule, UsernameMentionRule, IDMentionRule, BaseRule
 
 if TYPE_CHECKING:
-    from notifier.bot import NotificationBot
+    from notifier.base import BaseNotifier
     from userbot.client import UserbotClient
+    from ..storage import BoatStorage
 
 logger = logging.getLogger(__name__)
 
 
 class MentionHandler:
-    """Handler for detecting mentions and replies to the user."""
+    """Handler for detecting mentions, replies, and boat report commands."""
 
-    def __init__(self, userbot: "UserbotClient", notifier: "NotificationBot"):
+    def __init__(
+        self, 
+        userbot: "UserbotClient", 
+        notifier: "BaseNotifier",
+        boat_storage: Optional["BoatStorage"] = None
+    ):
         """
         Initialize mention handler.
 
         Args:
             userbot: UserbotClient instance
-            notifier: NotificationBot instance for sending alerts
+            notifier: BaseNotifier instance for sending alerts
+            boat_storage: Optional BoatStorage for boat reports
         """
         self.userbot = userbot
         self.notifier = notifier
+        self.boat_storage = boat_storage
         self._my_id: int = None
         self._my_username: str = None
+        
+        # Initialize rules
+        self.rules: List[BaseRule] = [
+            ReplyRule(),
+            UsernameMentionRule(),
+            IDRule := IDMentionRule(),
+        ]
 
     def register(self):
         """Register event handler with the client."""
+        # Detect both incoming and outgoing messages to catch commands from other devices
         self.userbot.client.add_event_handler(
             self._on_new_message,
-            events.NewMessage(incoming=True),
+            events.NewMessage(),
         )
-        logger.info("MentionHandler registered")
+        logger.info("MentionHandler registered with %s rules", len(self.rules))
 
     async def _on_new_message(self, event: events.NewMessage.Event):
         """
-        Handle incoming messages and check for mentions.
-
-        Args:
-            event: New message event
+        Handle incoming and outgoing messages.
+        Check for commands (even if outgoing) and mentions (only if incoming).
         """
         if self._my_id is None:
             self._my_id = self.userbot.my_id
             self._my_username = self.userbot.my_username
 
         message = event.message
+        text = message.text or ""
 
-        if message.sender_id == self._my_id:
+        # DEBUG: log messages in the bot chat to see if we see them
+        bot_token = getattr(self.notifier, "bot_token", "")
+        bot_id = int(bot_token.split(":")[0]) if ":" in bot_token else None
+        
+        if event.is_private and event.chat_id == bot_id:
+            logger.debug("Bot chat message detected (chat_id: %s, outgoing: %s): %s", 
+                         event.chat_id, message.out, text[:50])
+
+        # 1. Handle command /report or /boats or button text (always allowed, even if outgoing)
+        is_report_command = text.strip().lower() in ["/report", "/boats", "отчет", "📊 отчет по лодкам"]
+        
+        if self.boat_storage and is_report_command:
+            # Check if this is a chat with the bot or the notification chat
+            if event.chat_id == bot_id or event.chat_id == self.notifier.chat_id:
+                logger.info("Command /report detected (outgoing=%s)", message.out)
+                await self._send_boat_report()
+                return
+
+        # Filter out ignored chats
+        if event.chat_id in getattr(config, "IGNORED_CHATS", []):
             return
 
-        if not message.text and not message.raw_text:
+        # 2. Skip other self-messages (mentions, etc.)
+        if message.out or message.sender_id == self._my_id:
+            return
+
+        # Filter out messages from bots if IGNORE_BOTS is enabled
+        if getattr(config, "IGNORE_BOTS", True):
+            try:
+                sender = await event.get_sender()
+                if sender and getattr(sender, "bot", False):
+                    return
+            except Exception as e:
+                logger.warning("Error fetching sender to check for bot: %s", e)
+
+        if not text:
             return
 
         result = await self._check_mention(event)
@@ -67,48 +109,94 @@ class MentionHandler:
             mention_type, tag = result
             await self._send_alert(event, mention_type, tag)
 
+    async def _send_boat_report(self):
+        """Generate and send today's boat report grouped by pier and beautifully formatted."""
+        import datetime
+        from collections import defaultdict
+        
+        if not self.boat_storage:
+            return
+
+        events = self.boat_storage.get_todays_events()
+        
+        if not events:
+            await self.notifier.send_notification("📊 <b>Сегодня событий по лодкам пока нет.</b>")
+            return
+
+        # 1. Group events by boat
+        boat_events = defaultdict(list)
+        for e in events:
+            boat_events[e['boat_name']].append(e)
+
+        # 2. Group boats by their LATEST pier
+        pier_groups = defaultdict(list)
+        for boat_name, items in boat_events.items():
+            latest = items[-1]
+            pier = latest.get('pier') or "Разное / Не указано"
+            pier_groups[pier].append(boat_name)
+
+        report_lines = ["📊 <b>Статус лодок (Пхукет):</b>\n"]
+        
+        for pier in sorted(pier_groups.keys()):
+            report_lines.append(f"📍 <b>Пирс: {pier}</b>")
+            
+            for boat_name in sorted(pier_groups[pier]):
+                items = boat_events[boat_name]
+                latest = items[-1]
+                
+                # Format timeline
+                timeline_parts = []
+                last_status = None
+                last_time = None
+                
+                for item in items:
+                    try:
+                        dt = datetime.datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00'))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=datetime.timezone.utc)
+                        local_dt = dt + datetime.timedelta(hours=7)
+                        time_str = local_dt.strftime("%H:%M")
+                    except Exception:
+                        time_str = item['timestamp'].split(' ')[1][:5] if ' ' in item['timestamp'] else "??:??"
+                    
+                    status = item['status'].capitalize()
+                    if status != last_status or time_str != last_time:
+                        timeline_parts.append(f"<code>{time_str}</code> {status}")
+                        last_status = status
+                        last_time = time_str
+                
+                timeline = " ➔ ".join(timeline_parts)
+                
+                # Boat block with standard labeling
+                report_lines.append(f"   🛥 <b>Лодка: {boat_name}</b>")
+                
+                if latest.get('program'):
+                    report_lines.append(f"   📝 <b>Программа:</b> <i>{latest['program']}</i>")
+                
+                report_lines.append(f"   📈 <b>Статус:</b> {timeline}")
+            
+            report_lines.append("") # Spacer between piers
+
+        final_text = "\n".join(report_lines).strip()
+        await self.notifier.send_notification(
+            final_text, 
+            reply_markup=self.notifier.get_main_menu()
+        )
+        logger.info("Sent standardized boat report")
+
     async def _check_mention(self, event: events.NewMessage.Event) -> tuple[str, str] | None:
         """
-        Check if message contains a mention of the user.
-
-        Args:
-            event: New message event
-
-        Returns:
-            (display_type, tag) for notification, or None. tag: "reply" | "mention"
+        Run all registered rules to check for a mention.
         """
-        message = event.message
-
-        if message.reply_to:
-            try:
-                replied_msg = await event.get_reply_message()
-                if replied_msg and replied_msg.sender_id == self._my_id:
-                    return ("ответил на ваше сообщение", "reply")
-            except Exception as e:
-                logger.debug("Could not get reply message: %s", e)
-
-        if message.entities:
-            text = message.text or message.raw_text or ""
-            for entity in message.entities:
-                if isinstance(entity, MessageEntityMention):
-                    mentioned_username = text[entity.offset : entity.offset + entity.length]
-                    mentioned_username = mentioned_username.lstrip("@").lower()
-                    if self._my_username and mentioned_username == self._my_username.lower():
-                        return ("упомянул вас", "mention")
-
-                elif isinstance(entity, MessageEntityMentionName):
-                    if entity.user_id == self._my_id:
-                        return ("упомянул вас", "mention")
-
+        for rule in self.rules:
+            result = await rule.check(event, self._my_id, self._my_username)
+            if result:
+                return result
         return None
 
     async def _send_alert(self, event: events.NewMessage.Event, mention_type: str, tag: str):
         """
         Send notification about the mention.
-
-        Args:
-            event: New message event
-            mention_type: Type of mention
         """
         message = event.message
 
@@ -182,17 +270,14 @@ class MentionHandler:
         return "Unknown Chat"
 
 
-def create_mention_handler(userbot: "UserbotClient", notifier: "NotificationBot") -> MentionHandler:
+def create_mention_handler(
+    userbot: "UserbotClient", 
+    notifier: "BaseNotifier",
+    boat_storage: Optional["BoatStorage"] = None
+) -> MentionHandler:
     """
     Factory function to create and register mention handler.
-
-    Args:
-        userbot: UserbotClient instance
-        notifier: NotificationBot instance
-
-    Returns:
-        MentionHandler instance
     """
-    handler = MentionHandler(userbot, notifier)
+    handler = MentionHandler(userbot, notifier, boat_storage)
     handler.register()
     return handler

@@ -13,3 +13,8 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Database files
+*.db
+*.db.bak
+

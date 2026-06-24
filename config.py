@@ -28,6 +28,8 @@ class Config:
 
     # Optional settings
     LOG_LEVEL: str = "INFO"
+    IGNORED_CHATS: list = []
+    IGNORE_BOTS: bool = True
 
     def __init__(self):
         """Load and validate configuration."""
@@ -46,6 +48,22 @@ class Config:
         """Load optional environment variables with defaults."""
         self.SESSION_NAME = os.getenv("SESSION_NAME", "userbot_session")
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+        
+        # Ignored chats (comma-separated list of IDs)
+        ignored_chats_raw = os.getenv("IGNORED_CHATS", "")
+        self.IGNORED_CHATS = []
+        if ignored_chats_raw:
+            for item in ignored_chats_raw.split(","):
+                item = item.strip()
+                if item:
+                    try:
+                        self.IGNORED_CHATS.append(int(item))
+                    except ValueError:
+                        pass
+
+        # Ignore bots (default True)
+        ignore_bots_raw = os.getenv("IGNORE_BOTS", "True")
+        self.IGNORE_BOTS = ignore_bots_raw.lower() in ("true", "1", "yes", "on")
 
     def _validate(self):
         """Validate that all required variables are set."""

@@ -5,11 +5,12 @@ Notification bot - sends alerts via Telegram Bot API.
 import logging
 import aiohttp
 from typing import Optional
+from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
 
 
-class NotificationBot:
+class NotificationBot(BaseNotifier):
     """Bot for sending notification messages via Telegram Bot API."""
 
     BASE_URL = "https://api.telegram.org/bot{token}/{method}"
@@ -63,6 +64,7 @@ class NotificationBot:
         text: str,
         message_link: Optional[str] = None,
         parse_mode: str = "HTML",
+        reply_markup: Optional[dict] = None,
     ) -> bool:
         """
         Send notification message.
@@ -71,6 +73,7 @@ class NotificationBot:
             text: Message text (supports HTML formatting)
             message_link: Optional link to the original message
             parse_mode: Parse mode (HTML or Markdown)
+            reply_markup: Optional reply markup (keyboard)
 
         Returns:
             True if message was sent successfully
@@ -82,8 +85,10 @@ class NotificationBot:
             "disable_web_page_preview": True,
         }
 
-        # Add inline button with link if provided
-        if message_link:
+        # Use explicitly provided reply_markup or compile one from message_link
+        if reply_markup:
+            params["reply_markup"] = reply_markup
+        elif message_link:
             params["reply_markup"] = {
                 "inline_keyboard": [[
                     {"text": "📍 Перейти к сообщению", "url": message_link}
@@ -92,6 +97,17 @@ class NotificationBot:
 
         result = await self._api_call("sendMessage", **params)
         return result.get("ok", False)
+
+    def get_main_menu(self) -> dict:
+        """Get the main menu reply keyboard."""
+        return {
+            "keyboard": [
+                [{"text": "📊 Отчет по лодкам"}],
+                [{"text": "📖 Дневник капитана"}, {"text": "📆 Мои записи"}],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False
+        }
 
     async def send_mention_alert(
         self,
@@ -156,32 +172,6 @@ class NotificationBot:
             .replace("<", "&lt;")
             .replace(">", "&gt;")
         )
-
-    @staticmethod
-    def build_message_link(chat_id: int, message_id: int, is_private: bool = False) -> str:
-        """
-        Build a link to a Telegram message.
-
-        Args:
-            chat_id: Chat ID (can be negative for groups/channels)
-            message_id: Message ID
-            is_private: Whether the chat is private
-
-        Returns:
-            Message link string
-        """
-        if is_private:
-            return f"tg://openmessage?user_id={chat_id}&message_id={message_id}"
-
-        if chat_id < 0:
-            chat_id_str = str(chat_id)
-            if chat_id_str.startswith("-100"):
-                link_chat_id = chat_id_str[4:]
-            else:
-                link_chat_id = chat_id_str[1:]
-            return f"https://t.me/c/{link_chat_id}/{message_id}"
-
-        return f"tg://openmessage?user_id={chat_id}&message_id={message_id}"
 
     async def close(self):
         """Close the aiohttp session."""

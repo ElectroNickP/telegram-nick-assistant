@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram Nick Assistant (userbot + mentions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'cd "@PROJECT_ROOT@" && .venv/bin/python main.py'
+
+Restart=on-failure
+RestartSec=10
+
+Nice=5
+MemoryMax=256M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-nick-assistant
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
